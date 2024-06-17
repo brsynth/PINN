@@ -4,30 +4,102 @@ from sklearn.metrics import r2_score
 from tools import nul_matrix_except_one_column_of_ones, normalize, denormalize
 
 class Pinn(nn.Module):
+    """
+    Class of physicals-informed neural network.
+    
+    Attributes
+    ----------
+    t : torch.Tensor
+        temporal data given at initialization
+    t_batch : torch.Tensor
+        temporal data reshape for batch
+    nb_variables : int
+        total number of variables
+    variables_data : dict (str : torch.Tensor)
+        dictionary with known variable name as key and the corresponding data
+        as associated values
+    variables_max : dict (str : torch.Tensor)
+        dictionary with known variable name as key and the maximum on the data
+        for this variable as value 
+    variables_min : dict (str : torch.Tensor)
+        dictionary with known variable name as key and the minimum on the data
+        for this variable as value 
+    variables_norm : dict (str : torch.Tensor)
+        dictionary with known variable name as key and the normalized data for
+        this variable as value 
+    variables : dict (str : torch.Tensor or int)
+        dictionary with all variable name as key and the data tensor if known
+        and the integer 1 if not known
+    ode_residual_dict : dict (str : function)
+        dictionary of function that compute the residual for every equation
+    true_parameters : list (float)
+        list of the true parameters used to compute the score
+    ode_parameters_ranges : list (tuple)
+        list of given ranges for parameters of ode
+    ode_parameters : dict (str : torch.Tensor)
+        estimated parameters for ode learned by the pinn training
+    params : list (torch.Tensor)
+        list of parameter from the neural network and ode parameters
+    neural_net : NeuralNet
+        multi-layer neural network used to learn the variables form temporal
+        data
+    
+    Methods
+    -------
+    net_f : (t_batch) -> (residual,neural_output)
+        returns the residual given by ode system and the output of the neural
+        network for a given batch. This method also returns the
+        output of the neural layer. 
+    
+    train : (n_epochs) -> (r2_store, last_pred_unorm,losses, learned_parameters)
+        train the network for a given number of epochs. At every
+        epoch the loss on the variables and the residual loss are computed and
+        stored in losses. Similarly the r2_score is computed at each epoch and
+        stored in r2_scores. At the end of training this methods return also
+        the last predicted variables output of the neural layer, and the
+        learned parameters.
+
+
+    output_param_range : (param, index) -> (framed parameter)
+        this method send the given parameter into the range of
+        ode_parameter_ranges of corresponding index
+    """
 
     def __init__(self,
-                 ODE_residual_dict,
-                 true_parameters,
+                 ode_residual_dict,
                  ranges,
                  data_t,
-                 data_dict,
+                 variables_data,
+                 variables_no_data,
                  parameter_names,
+                 true_parameters=[],
                  net_hidden =7):
         super(Pinn,self).__init__()
 
         # Temporal data
         self.t = torch.tensor(data_t, requires_grad=True,dtype=torch.float32)
-        self.t_batch = torch.reshape(self.t, (len(self.t),1)) #reshape for batch 
+        self.t_batch = torch.reshape(self.t, (len(self.t),1))
 
         # Variable used to fit the neural network
-        self.variables = {k : torch.tensor(v) for (k,v) in data_dict.items()}
-        self.variables_max = {k : max(v) for (k,v) in self.variables.items()}
-        self.variables_min = {k : min(v) for (k,v) in self.variables.items()}
-        self.variables_norm = {k : normalize(self.variables[k],self.variables_min[k],self.variables_max[k]) 
-                              for k in self.variables.keys()}
+        self.nb_variables = len(variables_data) + len(variables_no_data)
+        self.variables_data = {k : torch.tensor(v) for (k,v) in variables_data.items()}
+        self.variables_max = {k : max(v) for (k,v) in self.variables_data.items()}
+        self.variables_min = {k : min(v) for (k,v) in self.variables_data.items()}
+        self.variables_norm = {k : normalize(self.variables_data[k],
+                                             self.variables_min[k],
+                                             self.variables_max[k])
+                                    for k in self.variables_data.keys()}
+
+        # on no_data value normalization is identity
+        self.variables_min.update({k:0 for k in variables_no_data.keys()})
+        self.variables_max.update({k:1 for k in variables_no_data.keys()})
+
+        # All variables
+        self.variables = dict(variables_data,
+                              **variables_no_data)
 
         # ODE residual computation
-        self.ODE_residual_dict = ODE_residual_dict
+        self.ode_residual_dict = ode_residual_dict
 
         # Original parameter used to compute score
         self.true_parameters=true_parameters
@@ -40,14 +112,29 @@ class Pinn(nn.Module):
                            for param in parameter_names}
 
         # Neural network with time as input and predict variables as output
-        self.neural_net = self.Neural_net(net_hidden,len(self.variables))
+        self.neural_net = self.NeuralNet(net_hidden,self.nb_variables)
         self.params = list(self.neural_net.parameters())
         self.params.extend(self.ode_parameters.values())
 
 
-    class Neural_net(nn.Module): # input = [[t1], [t2]...[t100]] -- that is, a batch of timesteps
+    class NeuralNet(nn.Module): # input = [[t1], [t2]...[t100]] -- that is, a batch of timesteps
+
+        """
+        Multi-layers neural network. The number of hidden layer is chosen as
+        variable. Every layer have 20 neurons.
+
+        Attributes
+        ----------
+        linear_relu_stack : 
+            the multi_layer neural network
+
+        Methods
+        -------
+        forward :
+            the forward method defined by passing through the neural network
+        """
         def __init__(self,net_hidden,output_size):
-            super(Pinn.Neural_net, self).__init__()
+            super(Pinn.NeuralNet, self).__init__()
 
             layers = [nn.Linear(1, 20), nn.ReLU()]
             for _ in range(net_hidden):
@@ -63,6 +150,24 @@ class Pinn(nn.Module):
 
     # Residual ODE from the output of neural network
     def net_f(self, t_batch):
+        """
+        Returns the residual given by ode system and the output of the neural
+        network for a given batch. This method also returns the
+        output of the neural layer. 
+
+        Parameters
+        ----------
+        t_batch : torch.Tensor
+            temporal data reshape for batch
+        
+        Returns
+        -------
+        residual : list (toch.Tensor)
+            residual computed on the neural network output with ode equation
+        neural_output : torch.Tensor
+            output of the neural network for all times
+
+        """
 
         # Output for all variables for all time
         # shape is (time_batch,nb_of_variables)
@@ -71,25 +176,61 @@ class Pinn(nn.Module):
         # Compute derivative of variable on every time of t_batch
         d_dt_var_dict = {}
         for i,k in enumerate(self.variables.keys()):
-            m = nul_matrix_except_one_column_of_ones((len(self.t),len(self.variables)),i)
+            m = nul_matrix_except_one_column_of_ones((len(self.t),self.nb_variables),i)
             net_output.backward(m, retain_graph=True)
             d_dt_var_dict[k]=self.t.grad.clone()
             self.t.grad.zero_()
 
         # denormalize variables output
-        var_output_net_dict= {k : denormalize(net_output[:,i],self.variables_min[k],self.variables_max[k]) 
-                   for (i,k) in enumerate(self.variables.keys())}
-        
+        var_output_net_dict= {k : denormalize(net_output[:,i],
+                                              self.variables_min[k],
+                                              self.variables_max[k])
+                              for (i,k) in enumerate(self.variables.keys())}
+
         # Predicted parameters
-        params_dict = {k: self.output_param_range(v,i) for (i,(k,v)) in enumerate(self.ode_parameters.items())}
-        
+        params_dict = {k: self.output_param_range(v,i)
+                       for (i,(k,v)) in enumerate(self.ode_parameters.items())}
+
         # Get residual according to ODE
-        residual = [res(var_output_net_dict, d_dt_var_dict, params_dict, self.variables_min,self.variables_max)
-               for res in self.ODE_residual_dict.values()]
-        return residual, [net_output[:,i] for i in range(len(self.variables))]
+        residual = [res(var_output_net_dict,
+                        d_dt_var_dict,
+                        params_dict,
+                        self.variables_min,
+                        self.variables_max)
+                    for res in self.ode_residual_dict.values()]
+        return residual, [net_output[:,i] for i in range(self.nb_variables)]
 
 
     def train(self, n_epochs):
+        """
+        Train the network for a given number of epochs. At every
+        epoch the loss on the variables and the residual loss are computed and
+        stored in losses. Similarly the r2_score is computed at each epoch and
+        stored in r2_scores. At the end of training this methods return also
+        the last predicted variables output of the neural layer, and the
+        learned parameters.
+
+        Parameters
+        ----------
+        n_epochs : int
+            number of epochs
+        
+        Returns
+        -------
+        r2_store : list (numpy.float64)
+            r2 scores for every epoch
+
+        last_pred_unorm : list (torch.Tensor)
+            last output variables of the neural network
+
+        losses : list (float)
+            losses for every epoch
+
+        all_learned_parameters : list (list (float))
+            learned parameters for every epochs
+        """
+
+
         print('\nstarting training...\n')
         r2_store = []
         all_learned_parameters = []
@@ -98,31 +239,54 @@ class Pinn(nn.Module):
         for epoch in range(n_epochs):
             if epoch % 1000 == 0:          
                 print('\nEpoch ', epoch)
-                print('#################################')   
+                print('#################################')
 
             res, net_output = self.net_f(self.t_batch)
             self.optimizer.zero_grad()
 
-            loss_residual = sum([torch.mean(torch.square(r)) for r in res])            
+            loss_residual = sum([torch.mean(torch.square(r)) for r in res])
+
+
             loss_variable_fit = sum([torch.mean(torch.square(v - net_output[i]))
                                      for (i,v) in enumerate(self.variables_norm.values())])
+
             loss = loss_residual + loss_variable_fit
             loss.backward()
             self.optimizer.step()
-            self.scheduler.step() 
+            self.scheduler.step()
 
-            learned_parameters = [self.output_param_range(v,i).item() 
+            learned_parameters = [self.output_param_range(v,i).item()
                              for (i,v) in enumerate(self.ode_parameters.values())]
 
             losses.append(loss.item())
-            all_learned_parameters.append(learned_parameters)        
-            r2_store.append(r2_score(self.true_parameters, learned_parameters))
+            all_learned_parameters.append(learned_parameters)
+            if self.true_parameters:
+                r2_store.append(r2_score(self.true_parameters, learned_parameters))
 
-        last_pred_unorm = [self.variables_min[k] + (self.variables_max[k] - self.variables_min[k]) * net_output[i]
-              for (i,k) in enumerate(self.variables.keys())]
+        last_pred_unorm = [self.variables_min[k] + (self.variables_max[k] -
+                                                    self.variables_min[k]) * net_output[i]
+                           for (i,k) in enumerate(self.variables.keys())]
 
-        return r2_store, last_pred_unorm, losses, all_learned_parameters
+        return r2_store, last_pred_unorm,losses, all_learned_parameters
 
 
     def output_param_range(self, param, index):
+        """
+        output_param_range : 
+        Returns the parameter of given index into the range given in 
+        ode_parameter_ranges. If the range is [a,b] the former parameter x is
+        sent to (tanh(x)+1)/2 * (b-a) + a.
+
+        Parameters
+        ----------
+        param : float
+            parameter to send in the given range
+        index : int
+            index of the parameter
+
+        Returns
+        -------
+        framed_parameters : 
+            the result of the framing function describe above
+        """
         return (torch.tanh(param) + 1) / 2 * (self.ode_parameters_ranges[index][1] - self.ode_parameters_ranges[index][0]) + self.ode_parameters_ranges[index][0]
