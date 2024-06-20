@@ -1,7 +1,6 @@
 import torch
 from torch import nn
-from sklearn.metrics import r2_score
-from tools import nul_matrix_except_one_column_of_ones, normalize, denormalize
+from tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage
 
 class Pinn(nn.Module):
     """
@@ -33,7 +32,7 @@ class Pinn(nn.Module):
     ode_residual_dict : dict (str : function)
         dictionary of function that compute the residual for every equation
     true_parameters : list (float)
-        list of the true parameters used to compute the score
+        list of the true parameters used to compute error on parameters
     ode_parameters_ranges : list (tuple)
         list of given ranges for parameters of ode
     ode_parameters : dict (str : torch.Tensor)
@@ -54,10 +53,10 @@ class Pinn(nn.Module):
     train : (n_epochs) -> (r2_store, last_pred_unorm,losses, learned_parameters)
         train the network for a given number of epochs. At every
         epoch the loss on the variables and the residual loss are computed and
-        stored in losses. Similarly the r2_score is computed at each epoch and
-        stored in r2_scores. At the end of training this methods return also
-        the last predicted variables output of the neural layer, and the
-        learned parameters.
+        stored in losses. Similarly an mean percentage of error on the learned
+        parameters is computed at each epoch and stored in parameters_error.
+        At the end of training this methods return also the last predicted
+        variables output of the neural layer, and the learned parameters.
 
 
     output_param_range : (param, index) -> (framed parameter)
@@ -101,7 +100,7 @@ class Pinn(nn.Module):
         # ODE residual computation
         self.ode_residual_dict = ode_residual_dict
 
-        # Original parameter used to compute score
+        # Original parameter used to compute error on parameter prediction
         self.true_parameters=true_parameters
 
         # Ranges of parameters
@@ -205,10 +204,10 @@ class Pinn(nn.Module):
         """
         Train the network for a given number of epochs. At every
         epoch the loss on the variables and the residual loss are computed and
-        stored in losses. Similarly the r2_score is computed at each epoch and
-        stored in r2_scores. At the end of training this methods return also
-        the last predicted variables output of the neural layer, and the
-        learned parameters.
+        stored in losses. Similarly the mean of the percentage of error in the
+        parameter prediction is computed and stored in parameter_errors. At
+        the end of training this methods return also the last predicted
+        variables output of the neural layer, and the learned parameters.
 
         Parameters
         ----------
@@ -217,8 +216,8 @@ class Pinn(nn.Module):
         
         Returns
         -------
-        r2_store : list (numpy.float64)
-            r2 scores for every epoch
+        parameter_errors : list (numpy.float64)
+            errors as percentage mean for every epoch
 
         last_pred_unorm : list (torch.Tensor)
             last output variables of the neural network
@@ -232,7 +231,8 @@ class Pinn(nn.Module):
 
 
         print('\nstarting training...\n')
-        r2_store = []
+        # r2_store = []
+        parameter_errors = []
         all_learned_parameters = []
         losses = []
 
@@ -251,6 +251,7 @@ class Pinn(nn.Module):
                                      for (i,v) in enumerate(self.variables_norm.values())])
 
             loss = loss_residual + loss_variable_fit
+            # loss = loss_residual
             loss.backward()
             self.optimizer.step()
             self.scheduler.step()
@@ -261,18 +262,17 @@ class Pinn(nn.Module):
             losses.append(loss.item())
             all_learned_parameters.append(learned_parameters)
             if self.true_parameters:
-                r2_store.append(r2_score(self.true_parameters, learned_parameters))
+                parameter_errors.append(mean_error_percentage(self.true_parameters, learned_parameters))
 
         last_pred_unorm = [self.variables_min[k] + (self.variables_max[k] -
                                                     self.variables_min[k]) * net_output[i]
                            for (i,k) in enumerate(self.variables.keys())]
 
-        return r2_store, last_pred_unorm,losses, all_learned_parameters
+        return parameter_errors, last_pred_unorm,losses, all_learned_parameters
 
 
     def output_param_range(self, param, index):
         """
-        output_param_range : 
         Returns the parameter of given index into the range given in 
         ode_parameter_ranges. If the range is [a,b] the former parameter x is
         sent to (tanh(x)+1)/2 * (b-a) + a.
@@ -286,7 +286,7 @@ class Pinn(nn.Module):
 
         Returns
         -------
-        framed_parameters : 
+        framed_parameters : float
             the result of the framing function describe above
         """
         return (torch.tanh(param) + 1) / 2 * (self.ode_parameters_ranges[index][1] - self.ode_parameters_ranges[index][0]) + self.ode_parameters_ranges[index][0]
