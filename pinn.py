@@ -39,6 +39,8 @@ class Pinn(nn.Module):
         estimated parameters for ode learned by the pinn training
     params : list (torch.Tensor)
         list of parameter from the neural network and ode parameters
+    constants : dict (str : torch.Tensor)
+        dictionary with the parameters that we already know and consider as constants
     neural_net : NeuralNet
         multi-layer neural network used to learn the variables form temporal
         data
@@ -72,6 +74,8 @@ class Pinn(nn.Module):
                  variables_no_data,
                  parameter_names,
                  true_parameters=[],
+                 constants_names=[],
+                 constants=[], 
                  net_hidden =7):
         super(Pinn,self).__init__()
 
@@ -114,6 +118,7 @@ class Pinn(nn.Module):
         self.neural_net = self.NeuralNet(net_hidden,self.nb_variables)
         self.params = list(self.neural_net.parameters())
         self.params.extend(self.ode_parameters.values())
+        self.constants_dict = dict(zip(constants_names, constants))
 
 
     class NeuralNet(nn.Module): # input = [[t1], [t2]...[t100]] -- that is, a batch of timesteps
@@ -191,9 +196,10 @@ class Pinn(nn.Module):
                        for (i,(k,v)) in enumerate(self.ode_parameters.items())}
 
         # Get residual according to ODE
+        value_dict = params_dict | self.constants_dict
         residual = [res(var_output_net_dict,
                         d_dt_var_dict,
-                        params_dict,
+                        value_dict,
                         self.variables_min,
                         self.variables_max)
                     for res in self.ode_residual_dict.values()]
