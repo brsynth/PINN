@@ -1,5 +1,6 @@
 import torch 
 import numpy as np
+import random as rd
 
 def nul_matrix_except_one_column_of_ones(shape,index_col):
     """
@@ -100,3 +101,6 @@ def mean_error_percentage(true_parameters,learned_parameters):
     errors = param_error_percentages(true_parameters,learned_parameters)
     return np.array(errors).mean()
 
+def random_ranges(true_parameters):
+    """Returns random ranges for each of the parameters in the list"""
+    return [(rd.random()*p,(1+rd.random())*p) for p in true_parameters]
