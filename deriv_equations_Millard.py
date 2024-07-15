@@ -14,7 +14,7 @@ v_acetate_exchange = lambda v_max_acetate_exchange, ACE_cell, ACE_env, Keq_aceta
    v_max_acetate_exchange*(ACE_cell-ACE_env/Keq_acetate_exchange)/Km_ACE_acetate_exchange/(1+ACE_cell/Km_ACE_acetate_exchange+ACE_env/Km_ACE_acetate_exchange)
 
 #Only used to solve the ODE system
-def deriv_Millard(y, t, DICT): 
+def deriv_Millard(t, y, DICT): 
     GLC, ACE_env, X, ACCOA, ACP, ACE_cell = y
 
     dGLCdt = - v_glycolysis(v_max_glycolysis=DICT["v_max_glycolysis"],
@@ -112,7 +112,7 @@ def deriv_Millard(y, t, DICT):
 ODE_residual_dict_Millard = {
                      "ode_1" : 
                      lambda var_dict,d_dt_var_dict,value,min_var_dict,max_var_dict :
-                        d_dt_var_dict["GLC"] + (v_glycolysis(v_max_glycolysis=value["v_max_glycolysis"],
+                        d_dt_var_dict["GLC"] - (-v_glycolysis(v_max_glycolysis=value["v_max_glycolysis"],
                                                             GLC=var_dict["GLC"],
                                                             Km_GLC=value["Km_GLC"],
                                                             ACE_env=var_dict["ACE_env"],

@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage
+from tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage, init_weights_xavier
 
 class Pinn(nn.Module):
     """
@@ -116,6 +116,7 @@ class Pinn(nn.Module):
 
         # Neural network with time as input and predict variables as output
         self.neural_net = self.NeuralNet(net_hidden,self.nb_variables)
+        self.neural_net.apply(init_weights_xavier)
         self.params = list(self.neural_net.parameters())
         self.params.extend(self.ode_parameters.values())
         self.constants_dict = dict(zip(constants_names, constants))
@@ -140,16 +141,16 @@ class Pinn(nn.Module):
         def __init__(self,net_hidden,output_size):
             super(Pinn.NeuralNet, self).__init__()
 
-            layers = [nn.Linear(1, 20), nn.ReLU()]
+            layers = [nn.Linear(1, 20), nn.LeakyReLU()]
             for _ in range(net_hidden):
                 layers.append(nn.Linear(20, 20))
-                layers.append(nn.ReLU())
+                layers.append(nn.LeakyReLU())
             layers.append(nn.Linear(20, output_size))
-            layers.append(nn.ReLU())
-            self.linear_relu_stack = nn.Sequential(*layers)
+            layers.append(nn.LeakyReLU())
+            self.linear_leaky_relu_stack = nn.Sequential(*layers)
 
         def forward(self, t_batch):
-            logits = self.linear_relu_stack(t_batch)
+            logits = self.linear_leaky_relu_stack(t_batch)
             return logits
 
     # Residual ODE from the output of neural network
@@ -241,6 +242,8 @@ class Pinn(nn.Module):
         parameter_errors = []
         all_learned_parameters = []
         losses = []
+        residudal_losses = []
+        variable_fit_losses = []
 
         for epoch in range(n_epochs):
             if epoch % 1000 == 0:          
@@ -266,6 +269,8 @@ class Pinn(nn.Module):
                              for (i,v) in enumerate(self.ode_parameters.values())]
 
             losses.append(loss.item())
+            residudal_losses.append(loss_residual.item())
+            variable_fit_losses.append(loss_variable_fit.item())
             all_learned_parameters.append(learned_parameters)
             if self.true_parameters:
                 parameter_errors.append(mean_error_percentage(self.true_parameters, learned_parameters))
@@ -274,7 +279,7 @@ class Pinn(nn.Module):
                                                     self.variables_min[k]) * net_output[i]
                            for (i,k) in enumerate(self.variables.keys())]
 
-        return parameter_errors, last_pred_unorm,losses, all_learned_parameters
+        return parameter_errors, last_pred_unorm, losses, variable_fit_losses, residudal_losses, all_learned_parameters
 
 
     def output_param_range(self, param, index):

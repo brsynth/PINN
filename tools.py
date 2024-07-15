@@ -1,4 +1,5 @@
 import torch 
+from torch import nn
 import numpy as np
 import random as rd
 
@@ -104,3 +105,19 @@ def mean_error_percentage(true_parameters,learned_parameters):
 def random_ranges(true_parameters):
     """Returns random ranges for each of the parameters in the list"""
     return [(rd.random()*p,(1+rd.random())*p) for p in true_parameters]
+
+def init_weights_xavier(m):
+            if isinstance(m, nn.Linear):
+                torch.nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    m.bias.data.fill_(0.01)
+
+# takes in a module and applies the specified weight initialization
+def weights_init_uniform(m):
+    classname = m.__class__.__name__
+    # for every Linear layer in a model..
+    if classname.find('Linear') != -1:
+    # apply a uniform distribution to the weights and a bias=0
+        m.weight.data.uniform_(0.0,1.0)
+        if m.bias is not None:
+            m.bias.data.fill_(0)
