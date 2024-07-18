@@ -39,12 +39,13 @@ class Pinn(nn.Module):
         estimated parameters for ode learned by the pinn training
     params : list (torch.Tensor)
         list of parameter from the neural network and ode parameters
-    constants_dict : dict (str : torch.Tensor)
-        dictionary with the parameters that we already know and consider as constants
+    constants_dict : dict (str : float)
+        dictionary with the parameters that we already know and consider as constants. Also contains true values of parameters
     neural_net : NeuralNet
-        multi-layer neural network used to learn the variables form temporal
-        data
-    
+        multi-layer neural network used to learn the variables from temporal data
+    coef_res : list (float)
+        list of coeficients to allow the user to change how each variable impacts the residual loss   
+         
     Methods
     -------
     net_f : (t_batch) -> (residual,neural_output)
@@ -75,6 +76,7 @@ class Pinn(nn.Module):
                  parameter_names,
                  true_parameters=[],
                  constants_dict={}, 
+                 coef_res = None,
                  net_hidden =7):
         super(Pinn,self).__init__()
 
@@ -119,6 +121,10 @@ class Pinn(nn.Module):
         self.params = list(self.neural_net.parameters())
         self.params.extend(self.ode_parameters.values())
         self.constants_dict = constants_dict
+        if coef_res is None :
+            self.coef_res = [1 for i in range(self.nb_variables)]
+        else :
+            self.coef_res = coef_res
 
 
     class NeuralNet(nn.Module): # input = [[t1], [t2]...[t100]] -- that is, a batch of timesteps
@@ -244,8 +250,6 @@ class Pinn(nn.Module):
         residudal_losses = []
         variable_fit_losses = []
         learning_rates = []
-        loss_res = False
-
         for epoch in range(n_epochs):
             if epoch % 1000 == 0:          
                 print('\nEpoch ', epoch)
@@ -254,18 +258,12 @@ class Pinn(nn.Module):
             res, net_output = self.net_f(self.t_batch)
             self.optimizer.zero_grad()
 
-            loss_residual = sum([torch.mean(torch.square(r)) for r in res])
-
+            loss_residual = sum([self.coef_res[i]*torch.mean(torch.square(res[i])) for i in range(self.nb_variables)])
 
             loss_variable_fit = sum([torch.mean(torch.square(v - net_output[i]))
                                      for (i,v) in enumerate(self.variables_norm.values())])
 
-            if loss_residual<10*loss_variable_fit: loss_res = True
-
-            if loss_res:
-                loss = loss_variable_fit + loss_residual
-            else:
-                loss = loss_variable_fit
+            loss = loss_variable_fit + loss_residual
 
             loss.backward()
             self.optimizer.step()
