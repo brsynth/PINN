@@ -39,7 +39,7 @@ class Pinn(nn.Module):
         estimated parameters for ode learned by the pinn training
     params : list (torch.Tensor)
         list of parameter from the neural network and ode parameters
-    constants : dict (str : torch.Tensor)
+    constants_dict : dict (str : torch.Tensor)
         dictionary with the parameters that we already know and consider as constants
     neural_net : NeuralNet
         multi-layer neural network used to learn the variables form temporal
@@ -74,8 +74,7 @@ class Pinn(nn.Module):
                  variables_no_data,
                  parameter_names,
                  true_parameters=[],
-                 constants_names=[],
-                 constants=[], 
+                 constants_dict={}, 
                  net_hidden =7):
         super(Pinn,self).__init__()
 
@@ -119,7 +118,7 @@ class Pinn(nn.Module):
         self.neural_net.apply(init_weights_xavier)
         self.params = list(self.neural_net.parameters())
         self.params.extend(self.ode_parameters.values())
-        self.constants_dict = dict(zip(constants_names, constants))
+        self.constants_dict = constants_dict
 
 
     class NeuralNet(nn.Module): # input = [[t1], [t2]...[t100]] -- that is, a batch of timesteps
@@ -197,7 +196,7 @@ class Pinn(nn.Module):
                        for (i,(k,v)) in enumerate(self.ode_parameters.items())}
 
         # Get residual according to ODE
-        value_dict = params_dict | self.constants_dict
+        value_dict = self.constants_dict | params_dict 
         residual = [res(var_output_net_dict,
                         d_dt_var_dict,
                         value_dict,
@@ -244,6 +243,8 @@ class Pinn(nn.Module):
         losses = []
         residudal_losses = []
         variable_fit_losses = []
+        learning_rates = []
+        loss_res = False
 
         for epoch in range(n_epochs):
             if epoch % 1000 == 0:          
@@ -259,8 +260,13 @@ class Pinn(nn.Module):
             loss_variable_fit = sum([torch.mean(torch.square(v - net_output[i]))
                                      for (i,v) in enumerate(self.variables_norm.values())])
 
-            loss = loss_residual + loss_variable_fit
-            # loss = loss_residual
+            if loss_residual<10*loss_variable_fit: loss_res = True
+
+            if loss_res:
+                loss = loss_variable_fit + loss_residual
+            else:
+                loss = loss_variable_fit
+
             loss.backward()
             self.optimizer.step()
             self.scheduler.step()
@@ -271,6 +277,7 @@ class Pinn(nn.Module):
             losses.append(loss.item())
             residudal_losses.append(loss_residual.item())
             variable_fit_losses.append(loss_variable_fit.item())
+            learning_rates.append(self.scheduler.get_last_lr())
             all_learned_parameters.append(learned_parameters)
             if self.true_parameters:
                 parameter_errors.append(mean_error_percentage(self.true_parameters, learned_parameters))
@@ -279,7 +286,7 @@ class Pinn(nn.Module):
                                                     self.variables_min[k]) * net_output[i]
                            for (i,k) in enumerate(self.variables.keys())]
 
-        return parameter_errors, last_pred_unorm, losses, variable_fit_losses, residudal_losses, all_learned_parameters
+        return parameter_errors, last_pred_unorm, losses, variable_fit_losses, residudal_losses, all_learned_parameters, learning_rates
 
 
     def output_param_range(self, param, index):
