@@ -40,11 +40,11 @@ class Pinn(nn.Module):
     params : list (torch.Tensor)
         list of parameter from the neural network and ode parameters
     constants_dict : dict (str : float)
-        dictionary with the parameters that we already know and consider as constants. Also contains true values of parameters
+        dictionary with all parameters of the ode : the ones that we use as constant and the ones that we want to find by using the PINN.
     neural_net : NeuralNet
         multi-layer neural network used to learn the variables from temporal data
-    coef_res : list (float)
-        list of coeficients to allow the user to change how each variable impacts the residual loss   
+    residual_weights : list (float)
+        list of weights to ponder every part of the residual loss associated to the different equations in ode system
          
     Methods
     -------
@@ -76,8 +76,8 @@ class Pinn(nn.Module):
                  parameter_names,
                  true_parameters=[],
                  constants_dict={}, 
-                 coef_res = None,
-                 net_hidden =7):
+                 residual_weights=None,
+                 net_hidden=7):
         super(Pinn,self).__init__()
 
         # Temporal data
@@ -121,10 +121,10 @@ class Pinn(nn.Module):
         self.params = list(self.neural_net.parameters())
         self.params.extend(self.ode_parameters.values())
         self.constants_dict = constants_dict
-        if coef_res is None :
-            self.coef_res = [1 for i in range(self.nb_variables)]
+        if residual_weights is None :
+            self.residual_weights = [1 for i in range(self.nb_variables)]
         else :
-            self.coef_res = coef_res
+            self.residual_weights = residual_weights
 
 
     class NeuralNet(nn.Module): # input = [[t1], [t2]...[t100]] -- that is, a batch of timesteps
@@ -258,7 +258,7 @@ class Pinn(nn.Module):
             res, net_output = self.net_f(self.t_batch)
             self.optimizer.zero_grad()
 
-            loss_residual = sum([self.coef_res[i]*torch.mean(torch.square(res[i])) for i in range(self.nb_variables)])
+            loss_residual = sum([self.residual_weights[i]*torch.mean(torch.square(res[i])) for i in range(self.nb_variables)])
 
             loss_variable_fit = sum([torch.mean(torch.square(v - net_output[i]))
                                      for (i,v) in enumerate(self.variables_norm.values())])
