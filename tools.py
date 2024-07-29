@@ -102,9 +102,9 @@ def mean_error_percentage(true_parameters,learned_parameters):
     errors = param_error_percentages(true_parameters,learned_parameters)
     return np.array(errors).mean()
 
-def random_ranges(true_parameters):
+def random_ranges(true_parameters, scale):
     """Returns random ranges for each of the parameters in the list"""
-    return [(rd.random()*p/2,2*(1+rd.random())*p) for p in true_parameters]
+    return [(rd.random()*p/scale,scale*(1+rd.random())*p) for p in true_parameters]
 
 def init_weights_xavier(m):
             if isinstance(m, nn.Linear):
