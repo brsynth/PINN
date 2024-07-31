@@ -40,7 +40,7 @@ class Pinn(nn.Module):
     params : list (torch.Tensor)
         list of parameter from the neural network and ode parameters
     constants_dict : dict (str : float)
-        dictionary with all parameters of the ode : the ones that we use as constant and the ones that we want to find by using the PINN.
+        dictionary with every parameter in the ode : those that we use as constants and those that we want to find by using the PINN.
     neural_net : NeuralNet
         multi-layer neural network used to learn the variables from temporal data
     residual_weights : list (float)
@@ -74,11 +74,16 @@ class Pinn(nn.Module):
                  variables_data,
                  variables_no_data,
                  parameter_names,
-                 true_parameters=[],
                  constants_dict={}, 
                  residual_weights=None,
                  net_hidden=7):
         super(Pinn,self).__init__()
+
+        # Making sure that there is no unknwon constant
+        for c in list(constants_dict.items()):
+            key, value = c
+            if (value is None) and not (key in parameter_names):
+                raise ValueError("You did not provide a value for " + key + ". Please provide its value or define it as a parameter to be searched.")
 
         # Temporal data
         self.t = torch.tensor(data_t, requires_grad=True,dtype=torch.float32)
@@ -106,7 +111,11 @@ class Pinn(nn.Module):
         self.ode_residual_dict = ode_residual_dict
 
         # Original parameter used to compute error on parameter prediction
-        self.true_parameters=true_parameters
+        self.true_parameters=[]
+        for key in parameter_names:
+            self.true_parameters.append(constants_dict[key])
+        if None in self.true_parameters:
+            self.true_parameters = []
 
         # Ranges of parameters
         self.ode_parameters_ranges = ranges
