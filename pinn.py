@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage, init_weights_xavier
+from numpy import isnan
 
 class Pinn(nn.Module):
     """
@@ -79,7 +80,7 @@ class Pinn(nn.Module):
                  net_hidden=7):
         super(Pinn,self).__init__()
 
-        # Making sure that there is no unknwon constant
+        # Making sure that there is no unknown constant
         for c in list(constants_dict.items()):
             key, value = c
             if (value is None) and not (key in parameter_names):
@@ -181,7 +182,7 @@ class Pinn(nn.Module):
         
         Returns
         -------
-        residual : list (toch.Tensor)
+        residual : list (torch.Tensor)
             residual computed on the neural network output with ode equation
         neural_output : torch.Tensor
             output of the neural network for all times
@@ -256,7 +257,7 @@ class Pinn(nn.Module):
         parameter_errors = []
         all_learned_parameters = []
         losses = []
-        residudal_losses = []
+        residual_losses = []
         variable_fit_losses = []
         learning_rates = []
         for epoch in range(n_epochs):
@@ -274,6 +275,9 @@ class Pinn(nn.Module):
 
             loss = loss_variable_fit + loss_residual
 
+            if isnan(loss.detach().numpy()):
+                raise ValueError("loss is not a number (nan) anymore. Consider changing the hyperparameters. This happened at epoch " + str(epoch) +".")
+
             loss.backward()
             self.optimizer.step()
             self.scheduler.step()
@@ -282,7 +286,7 @@ class Pinn(nn.Module):
                              for (i,v) in enumerate(self.ode_parameters.values())]
 
             losses.append(loss.item())
-            residudal_losses.append(loss_residual.item())
+            residual_losses.append(loss_residual.item())
             variable_fit_losses.append(loss_variable_fit.item())
             learning_rates.append(self.scheduler.get_last_lr())
             all_learned_parameters.append(learned_parameters)
@@ -293,7 +297,7 @@ class Pinn(nn.Module):
                                                     self.variables_min[k]) * net_output[i]
                            for (i,k) in enumerate(self.variables.keys())]
 
-        return parameter_errors, last_pred_unorm, losses, variable_fit_losses, residudal_losses, all_learned_parameters, learning_rates
+        return parameter_errors, last_pred_unorm, losses, variable_fit_losses, residual_losses, all_learned_parameters, learning_rates
 
 
     def output_param_range(self, param, index):

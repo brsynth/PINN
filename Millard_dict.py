@@ -1,5 +1,4 @@
-#Dictionary with all the parameters known, from the litterature or found for Millard's model
-
+# Dictionary with all the parameters known, from the literature or found for Millard's model
 DICT = {
 
 "v_max_Pta":9565521.7634551357,
@@ -85,4 +84,28 @@ DICT = {
 "Ki_ACE_glycolysis":36.6776,
 
 "Keq_acetate_exchange":1
+}
+
+
+# Dictionary with the parameter ranges used by Millard 
+ranges_dict = {
+    "v_max_AckA":(1e3,1e7),
+
+    "v_max_Pta":(1e3,1e7),
+
+    "v_max_glycolysis":(1e3,1e7),
+
+    "Ki_ACE_glycolysis":(0.1,1e3), 
+
+    "Km_ACCOA_TCA_cycle":(0.1,1e3), 
+
+    "v_max_TCA_cycle":(1e3,1e8), 
+
+    "Ki_ACE_TCA_cycle":(0.1,1e3), 
+
+    "Y":(1e-5,1e-3), 
+
+    "v_max_acetate_exchange":(1e3,1e8), 
+
+    "Km_ACE_acetate_exchange":(0.1,1e3)
 }
