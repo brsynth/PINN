@@ -121,3 +121,11 @@ def weights_init_uniform(m):
         m.weight.data.uniform_(0.0,1.0)
         if m.bias is not None:
             m.bias.data.fill_(0)
+
+# calculates the sum of squared residuals error as described in Millard's paper (objective function)
+def ssr_error(standard_deviations_dict, observables, variable_data, variable_res):
+    ssr = 0
+    for key in observables:
+        for i in range(len(variable_data[key])):
+            ssr += ((variable_data[key][i] - variable_res[key][i])/standard_deviations_dict[key])**2
+    return ssr
