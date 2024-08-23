@@ -87,7 +87,7 @@ DICT = {
 }
 
 
-# Dictionary with the parameter ranges used by Millard 
+# Dictionary with the parameter ranges used in Millard's paper 
 ranges_dict = {
     "v_max_AckA":(1e3,1e7),
 
@@ -108,4 +108,20 @@ ranges_dict = {
     "v_max_acetate_exchange":(1e3,1e8), 
 
     "Km_ACE_acetate_exchange":(0.1,1e3)
+}
+
+
+# Standard deviations used to calculate the SSR 
+standard_deviations_dict = {
+    "GLC":0.5,
+
+    "ACE_env":0.2,
+    
+    "X":0.045,
+    
+    "ACCOA":1, # made-up standard deviation only to test on Millard_pinn_toy
+    
+    "ACP":1, # made-up standard deviation only to test on Millard_pinn_toy
+    
+    "ACE_cell":1 # made-up standard deviation only to test on Millard_pinn_toy
 }
