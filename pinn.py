@@ -1,7 +1,8 @@
 import torch
 from torch import nn
-from tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage, init_weights_xavier
+from tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage, init_weights_xavier, loss_calculator
 from numpy import isnan
+from tqdm import tqdm
 
 class Pinn(nn.Module):
     """
@@ -40,12 +41,24 @@ class Pinn(nn.Module):
         estimated parameters for ode learned by the pinn training
     params : list (torch.Tensor)
         list of parameter from the neural network and ode parameters
+    optimizer_type : torch.optim.Optimizer
+        optimizer object used to update the parameters during training, e.g., torch.optim.Adam
+    scheduler_type : torch.optim.lr_scheduler._LRScheduler
+        learning rate scheduler used to adjust the learning rate during training, e.g., torch.optim.lr_scheduler.CyclicLR
     constants_dict : dict (str : float)
-        dictionary with every parameter in the ode : those that we use as constants and those that we want to find by using the PINN.
+        dictionary with every parameter in the ode : those that we use as constants and those that we want to find by using the PINN
     neural_net : NeuralNet
         multi-layer neural network used to learn the variables from temporal data
     residual_weights : list (float)
         list of weights to ponder every part of the residual loss associated to the different equations in ode system
+    variable_fit_weights : list (float)
+        list of weights to ponder every part of the variable fit loss associated to the different observables
+    SoftAdapt_beta : float
+        hyperparameter employed when using the SoftAdapt method for balancing losses
+    SoftAdapt_t : int
+        hyperparameter employed when using the SoftAdapt method for balancing losses
+    prior_losses_t : int 
+        similar to SoftAdapt_t but using the prior loss method
          
     Methods
     -------
@@ -75,9 +88,19 @@ class Pinn(nn.Module):
                  variables_data,
                  variables_no_data,
                  parameter_names,
+                 optimizer_type,
+                 optimizer_hyperparameters,
+                 scheduler_type,
+                 scheduler_hyperparameters,
                  constants_dict={}, 
+                 multi_loss_method="",
                  residual_weights=None,
-                 net_hidden=7):
+                 variable_fit_weights=None,
+                 SoftAdapt_beta=0.1,
+                 SoftAdapt_t=100,
+                 prior_losses_t=1,
+                 net_hidden=7,
+                 ):
         super(Pinn,self).__init__()
 
         # Making sure that there is no unknown constant
@@ -130,12 +153,24 @@ class Pinn(nn.Module):
         self.neural_net.apply(init_weights_xavier)
         self.params = list(self.neural_net.parameters())
         self.params.extend(self.ode_parameters.values())
+        self.optimizer = optimizer_type(**({"params":self.params} | optimizer_hyperparameters))
+        self.scheduler = scheduler_type(**({"optimizer":self.optimizer} | scheduler_hyperparameters))
         self.constants_dict = constants_dict
+        self.multi_loss_method = multi_loss_method
+
         if residual_weights is None :
             self.residual_weights = [1 for i in range(self.nb_variables)]
         else :
             self.residual_weights = residual_weights
 
+        if variable_fit_weights is None :
+            self.variable_fit_weights = [1 for (i,v) in enumerate(self.variables_norm.values())]
+        else :
+            self.variable_fit_weights = variable_fit_weights
+
+        self.SoftAdapt_beta = SoftAdapt_beta
+        self.SoftAdapt_t = SoftAdapt_t
+        self.prior_losses_t = prior_losses_t
 
     class NeuralNet(nn.Module): # input = [[t1], [t2]...[t100]] -- that is, a batch of timesteps
 
@@ -252,7 +287,6 @@ class Pinn(nn.Module):
         """
 
 
-        print('\nstarting training...\n')
         # r2_store = []
         parameter_errors = []
         all_learned_parameters = []
@@ -260,20 +294,31 @@ class Pinn(nn.Module):
         residual_losses = []
         variable_fit_losses = []
         learning_rates = []
-        for epoch in range(n_epochs):
-            if epoch % 1000 == 0:          
-                print('\nEpoch ', epoch)
-                print('#################################')
-
+        losses_residual_list = []
+        losses_variable_fit_list = []
+        for epoch in tqdm(range(n_epochs), desc="Training the neural network", ncols=150):
             res, net_output = self.net_f(self.t_batch)
             self.optimizer.zero_grad()
 
-            loss_residual = sum([self.residual_weights[i]*torch.mean(torch.square(res[i])) for i in range(self.nb_variables)])
+            loss_residual_list = [torch.mean(torch.square(res[i])) for i in range(self.nb_variables)]
+            loss_variable_fit_list = [torch.mean(torch.square(v - net_output[i])) for (i,v) in enumerate(self.variables_norm.values())]
 
-            loss_variable_fit = sum([torch.mean(torch.square(v - net_output[i]))
-                                     for (i,v) in enumerate(self.variables_norm.values())])
+            losses_residual_list.append([loss_residual_list[i].item() for i in range(self.nb_variables)])
+            losses_variable_fit_list.append([loss_variable_fit_list[i].item() for (i,v) in enumerate(self.variables_norm.values())])
 
-            loss = loss_variable_fit + loss_residual
+            loss, loss_residual, loss_variable_fit = loss_calculator(epoch=epoch, 
+                                                                     multi_loss_method=self.multi_loss_method, 
+                                                                     loss_residual_list=loss_residual_list, 
+                                                                     loss_variable_fit_list=loss_variable_fit_list, 
+                                                                     losses_residual_list=losses_residual_list,
+                                                                     losses_variable_fit_list=losses_variable_fit_list,
+                                                                     residual_weights=self.residual_weights,
+                                                                     variable_fit_weights=self.variable_fit_weights,
+                                                                     nb_variables=self.nb_variables,
+                                                                     nb_observables=len(self.variables_data),
+                                                                     prior_losses_t=self.prior_losses_t,
+                                                                     SoftAdapt_t=self.SoftAdapt_t,
+                                                                     SoftAdapt_beta=self.SoftAdapt_beta,)
 
             if isnan(loss.detach().numpy()):
                 raise ValueError("loss is not a number (nan) anymore. Consider changing the hyperparameters. This happened at epoch " + str(epoch) +".")

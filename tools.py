@@ -129,3 +129,68 @@ def ssr_error(standard_deviations_dict, observables, variable_data, variable_res
         for i in range(len(variable_data[key])):
             ssr += ((variable_data[key][i] - variable_res[key][i])/standard_deviations_dict[key])**2
     return ssr
+
+# calculates the loss 
+def loss_calculator(epoch,
+                    multi_loss_method, 
+                    loss_residual_list, 
+                    loss_variable_fit_list, 
+                    losses_residual_list,
+                    losses_variable_fit_list,
+                    residual_weights,
+                    variable_fit_weights,
+                    nb_variables,
+                    nb_observables,
+                    prior_losses_t,
+                    SoftAdapt_t,
+                    SoftAdapt_beta,
+                    ):
+    loss_residual = sum(loss_residual_list)
+    loss_variable_fit = sum(loss_variable_fit_list)
+
+    # multiply each term of the loss by weights defined by user
+    if multi_loss_method == "my_weights":
+        loss_residual = sum([loss_residual_list[i]*residual_weights[i] 
+                                for i in range(nb_variables)])
+        loss_variable_fit = sum([loss_variable_fit_list[i]*variable_fit_weights[i] 
+                                    for i in range(nb_observables)])
+    
+    # divide each term of the loss by its own initial value
+    if multi_loss_method == "initial_losses":
+        loss_residual = sum([loss_residual_list[i]/(losses_residual_list[0][i]) 
+                                for i in range(nb_variables)])
+        loss_variable_fit = sum([loss_variable_fit_list[i]/(losses_variable_fit_list[0][i]) 
+                                    for i in range(nb_observables)])
+    
+    # divide each term of the loss by its prior value
+    if multi_loss_method == "prior_losses":
+        if epoch >= prior_losses_t:
+            loss_residual = sum([loss_residual_list[i]/(losses_residual_list[epoch-prior_losses_t][i]) 
+                                    for i in range(nb_variables)])
+            loss_variable_fit = sum([loss_variable_fit_list[i]/(losses_variable_fit_list[epoch-prior_losses_t][i]) 
+                                        for i in range(nb_observables)])
+    
+    # using the SoftAdapt method
+    if multi_loss_method[0:9] == "SoftAdapt":
+        loss_residual = sum([residual_weights[i]*loss_residual_list[i] for i in range(nb_variables)])
+        loss_variable_fit = sum([variable_fit_weights[i]*loss_variable_fit_list[i] for i in range(nb_observables)])
+        if epoch >= SoftAdapt_t:
+            s_list_residual = np.array([(loss_residual_list[i] - losses_residual_list[epoch-SoftAdapt_t][i]).item() 
+                                        for i in range(nb_variables)])
+            s_list_variable_fit = np.array([(loss_variable_fit_list[i] - losses_variable_fit_list[epoch-SoftAdapt_t][i]).item() 
+                                            for i in range(nb_observables)])
+            if len(multi_loss_method) > 9 :
+                if multi_loss_method[9:] == "_normalized":
+                    s_list_residual *= 1/np.sqrt(sum([x**2 for x in s_list_residual])+sum([x**2 for x in s_list_variable_fit]))
+                    s_list_residual *= 1/np.sqrt(sum([x**2 for x in s_list_residual])+sum([x**2 for x in s_list_variable_fit]))
+            
+            alpha_residual = np.array([np.exp(SoftAdapt_beta*s_list_residual[i]).item() for i in range(nb_variables)])
+            alpha_residual *= 1/sum(alpha_residual)
+
+            alpha_variable_fit = np.array([np.exp(SoftAdapt_beta*s_list_residual[i]).item() for i in range(nb_observables)])
+            alpha_variable_fit *= 1/sum(alpha_variable_fit)
+
+            loss_residual = sum([residual_weights[i]*loss_residual_list[i]*alpha_residual[i] for i in range(nb_variables)])
+            loss_variable_fit = sum([variable_fit_weights[i]*loss_variable_fit_list[i]*alpha_variable_fit[i] for i in range(nb_observables)])
+
+    return loss_variable_fit + loss_residual, loss_residual, loss_variable_fit
