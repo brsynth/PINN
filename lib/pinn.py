@@ -1,7 +1,10 @@
 import torch
+import numpy as np
 from torch import nn
-from tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage, init_weights_xavier
 from numpy import isnan
+from tqdm import tqdm
+from scipy.special import softmax
+from .tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage, init_weights_xavier
 
 class Pinn(nn.Module):
     """
@@ -11,41 +14,89 @@ class Pinn(nn.Module):
     ----------
     t : torch.Tensor
         temporal data given at initialization
+
     t_batch : torch.Tensor
         temporal data reshape for batch
+
     nb_variables : int
         total number of variables
+
     variables_data : dict (str : torch.Tensor)
         dictionary with known variable name as key and the corresponding data
         as associated values
+
     variables_max : dict (str : torch.Tensor)
         dictionary with known variable name as key and the maximum on the data
         for this variable as value 
+
     variables_min : dict (str : torch.Tensor)
         dictionary with known variable name as key and the minimum on the data
         for this variable as value 
+
     variables_norm : dict (str : torch.Tensor)
         dictionary with known variable name as key and the normalized data for
         this variable as value 
+
     variables : dict (str : torch.Tensor or int)
         dictionary with all variable name as key and the data tensor if known
         and the integer 1 if not known
+
     ode_residual_dict : dict (str : function)
         dictionary of function that compute the residual for every equation
+
     true_parameters : list (float)
         list of the true parameters used to compute error on parameters
+
     ode_parameters_ranges : list (tuple)
         list of given ranges for parameters of ode
+
     ode_parameters : dict (str : torch.Tensor)
         estimated parameters for ode learned by the pinn training
+
     params : list (torch.Tensor)
         list of parameter from the neural network and ode parameters
+
+    optimizer_type : torch.optim.Optimizer
+        optimizer object used to update the parameters during training, e.g.,
+        torch.optim.Adam
+
+    scheduler_type : torch.optim.lr_scheduler._LRScheduler
+        learning rate scheduler used to adjust the learning rate during
+        training, e.g., torch.optim.lr_scheduler.CyclicLR
+    
     constants_dict : dict (str : float)
-        dictionary with every parameter in the ode : those that we use as constants and those that we want to find by using the PINN.
+        dictionary with every parameter in the ode : those that we use as
+        constants and those that we want to find by using the PINN
+    
     neural_net : NeuralNet
-        multi-layer neural network used to learn the variables from temporal data
+        multi-layer neural network used to learn the variables from temporal
+        data
+    
     residual_weights : list (float)
-        list of weights to ponder every part of the residual loss associated to the different equations in ode system
+        list of weights to ponder every part of the residual loss associated
+        to the different equations in ode system
+    
+    variable_fit_weights : list (float)
+        list of weights to ponder every part of the variable fit loss
+        associated to the different observables
+    
+    soft_adapt_beta : float
+        hyperparameter employed when using the SoftAdapt method for balancing
+        losses
+    
+    soft_adapt_t : int
+        hyperparameter employed when using the SoftAdapt method for balancing
+        losses
+    
+    soft_adapt_normalize : bool
+        use normalization with the method soft adapt
+    
+    soft_adapt_by_type : bool
+        if we use the method soft adapt on residual losses on one side and on
+        variable losses on the other side or all together
+    
+    prior_losses_t : int 
+        similar to soft_adapt_t but using the prior loss method
          
     Methods
     -------
@@ -54,14 +105,14 @@ class Pinn(nn.Module):
         network for a given batch. This method also returns the
         output of the neural layer. 
     
-    train : (n_epochs) -> (r2_store, last_pred_unorm,losses, learned_parameters)
+    train : (n_epochs) -> (r2_store, last_pred_unorm,losses, 
+                           learned_parameters)
         train the network for a given number of epochs. At every
         epoch the loss on the variables and the residual loss are computed and
         stored in losses. Similarly an mean percentage of error on the learned
         parameters is computed at each epoch and stored in parameters_error.
         At the end of training this methods return also the last predicted
         variables output of the neural layer, and the learned parameters.
-
 
     output_param_range : (param, index) -> (framed parameter)
         this method send the given parameter into the range of
@@ -75,16 +126,30 @@ class Pinn(nn.Module):
                  variables_data,
                  variables_no_data,
                  parameter_names,
-                 constants_dict={}, 
+                 optimizer_type,
+                 optimizer_hyperparameters,
+                 scheduler_type,
+                 scheduler_hyperparameters,
+                 constants_dict={},
+                 multi_loss_method=None,
                  residual_weights=None,
-                 net_hidden=7):
+                 variable_fit_weights=None,
+                 soft_adapt_beta=0.1,
+                 soft_adapt_t=100,
+                 soft_adapt_normalize=True,
+                 soft_adapt_by_type=True,
+                 prior_losses_t=1,
+                 net_hidden=7,
+                 ):
         super(Pinn,self).__init__()
 
         # Making sure that there is no unknown constant
         for c in list(constants_dict.items()):
             key, value = c
             if (value is None) and not (key in parameter_names):
-                raise ValueError("You did not provide a value for " + key + ". Please provide its value or define it as a parameter to be searched.")
+                raise ValueError("You did not provide a value for " + key + \
+                                 ". Please provide its value or define it as \
+                                 a parameter to be searched.")
 
         # Temporal data
         self.t = torch.tensor(data_t, requires_grad=True,dtype=torch.float32)
@@ -92,9 +157,12 @@ class Pinn(nn.Module):
 
         # Variable used to fit the neural network
         self.nb_variables = len(variables_data) + len(variables_no_data)
-        self.variables_data = {k : torch.tensor(v) for (k,v) in variables_data.items()}
-        self.variables_max = {k : max(v) for (k,v) in self.variables_data.items()}
-        self.variables_min = {k : min(v) for (k,v) in self.variables_data.items()}
+        self.variables_data = {k : torch.tensor(v)
+                               for (k,v) in variables_data.items()}
+        self.variables_max = {k : max(v)
+                              for (k,v) in self.variables_data.items()}
+        self.variables_min = {k : min(v)
+                              for (k,v) in self.variables_data.items()}
         self.variables_norm = {k : normalize(self.variables_data[k],
                                              self.variables_min[k],
                                              self.variables_max[k])
@@ -122,22 +190,46 @@ class Pinn(nn.Module):
         self.ode_parameters_ranges = ranges
 
         # Parameters of ODE learned by training with residual loss
-        self.ode_parameters = {param: torch.nn.Parameter(torch.rand(1, requires_grad=True))
-                           for param in parameter_names}
+        self.ode_parameters = {param: torch.nn.Parameter(torch.rand(1,
+                                                                    requires_grad=True))
+                               for param in parameter_names}
 
         # Neural network with time as input and predict variables as output
         self.neural_net = self.NeuralNet(net_hidden,self.nb_variables)
         self.neural_net.apply(init_weights_xavier)
         self.params = list(self.neural_net.parameters())
         self.params.extend(self.ode_parameters.values())
+        self.optimizer = optimizer_type(**({"params":self.params} |
+                                           optimizer_hyperparameters))
+        self.scheduler = scheduler_type(**({"optimizer":self.optimizer} |
+                                           scheduler_hyperparameters))
         self.constants_dict = constants_dict
+        self.multi_loss_method = multi_loss_method
+
+
+        # initialize loss weights at 1 if not given
         if residual_weights is None :
-            self.residual_weights = [1 for i in range(self.nb_variables)]
+            self.residual_weights = [1]*self.nb_variables
         else :
             self.residual_weights = residual_weights
 
+        if variable_fit_weights is None :
+            self.variable_fit_weights = [1]*len(self.variables_data)
+        else :
+            self.variable_fit_weights = variable_fit_weights
 
-    class NeuralNet(nn.Module): # input = [[t1], [t2]...[t100]] -- that is, a batch of timesteps
+
+        self.nb_observables = len(variables_data)
+        self.nb_res=len(self.ode_residual_dict)
+
+        # parameter use into method for weight loss component
+        self.soft_adapt_beta = soft_adapt_beta
+        self.soft_adapt_t = soft_adapt_t
+        self.soft_adapt_normalize=soft_adapt_normalize
+        self.soft_adapt_by_type=soft_adapt_by_type
+        self.prior_losses_t = prior_losses_t
+
+    class NeuralNet(nn.Module): # input: [[t1], [t2]...[t100]] batch of timesteps
 
         """
         Multi-layers neural network. The number of hidden layer is chosen as
@@ -251,30 +343,65 @@ class Pinn(nn.Module):
             learned parameters for every epochs
         """
 
-
-        print('\nstarting training...\n')
-        # r2_store = []
+        # Monitor the training
         parameter_errors = []
         all_learned_parameters = []
         losses = []
         residual_losses = []
         variable_fit_losses = []
         learning_rates = []
-        for epoch in range(n_epochs):
-            if epoch % 1000 == 0:          
-                print('\nEpoch ', epoch)
-                print('#################################')
 
+        # Losses vectors for all epochs
+        all_loss_residual_list = []
+        all_loss_variable = []
+
+        for epoch in tqdm(range(n_epochs), desc="Training the neural network", ncols=150):
             res, net_output = self.net_f(self.t_batch)
             self.optimizer.zero_grad()
 
-            loss_residual = sum([self.residual_weights[i]*torch.mean(torch.square(res[i])) for i in range(self.nb_variables)])
+            # Actual epoch losses for every residual equation (mse on temporal
+            # data)
+            loss_residual_list = [torch.mean(torch.square(r)) for r in res]
+            # Actual epoch losses for every known variables (mse on temporal
+            # data)
+            loss_variable_fit_list = [torch.mean(torch.square(v - net_output[i]))
+                                      for (i,v) in enumerate(self.variables_norm.values())]
 
-            loss_variable_fit = sum([torch.mean(torch.square(v - net_output[i]))
-                                     for (i,v) in enumerate(self.variables_norm.values())])
+            # Losses for all epochs
+            all_loss_residual_list.append([l.item() for l in loss_residual_list])
+            all_loss_variable.append([l.item() for l in loss_variable_fit_list])
 
-            loss = loss_variable_fit + loss_residual
+            # Weights on losses component depending on the method
+            if self.multi_loss_method is None:
+                residual_method_weights = [1]*self.nb_res
+                variable_method_weights = [1]*self.nb_observables
 
+            elif self.multi_loss_method=="soft_adapt":
+                residual_method_weights,variable_method_weights=\
+                    self.soft_adapt(epoch,
+                                    all_loss_residual_list,
+                                    all_loss_variable,
+                                    )
+                
+            elif self.multi_loss_method == "prior_losses":
+                index=max(0,epoch-self.prior_losses_t)
+                residual_method_weights = [1/(all_loss_residual_list[index][i])
+                                           for i in range(self.nb_res)]
+                variable_method_weights = [1/(all_loss_variable[index][i])
+                                           for i in range(self.nb_observables)]
+
+            # loss multiply by manual weights and weights from method above
+            loss_residual = sum([loss_residual_list[i]*
+                                 residual_method_weights[i]*
+                                 self.residual_weights[i]
+                                 for i in range(self.nb_res)])
+            loss_variable_fit = sum([loss_variable_fit_list[i]*
+                                     variable_method_weights[i]*
+                                     self.variable_fit_weights[i]
+                                     for i in range(self.nb_observables)])
+            
+            loss = loss_residual + loss_variable_fit
+            
             if isnan(loss.detach().numpy()):
                 raise ValueError("loss is not a number (nan) anymore. Consider changing the hyperparameters. This happened at epoch " + str(epoch) +".")
 
@@ -291,10 +418,12 @@ class Pinn(nn.Module):
             learning_rates.append(self.scheduler.get_last_lr())
             all_learned_parameters.append(learned_parameters)
             if self.true_parameters:
-                parameter_errors.append(mean_error_percentage(self.true_parameters, learned_parameters))
+                parameter_errors.append(mean_error_percentage(self.true_parameters,
+                                                              learned_parameters))
 
         last_pred_unorm = [self.variables_min[k] + (self.variables_max[k] -
-                                                    self.variables_min[k]) * net_output[i]
+                                                    self.variables_min[k]) * 
+                                                    net_output[i]
                            for (i,k) in enumerate(self.variables.keys())]
 
         return parameter_errors, last_pred_unorm, losses, variable_fit_losses, residual_losses, all_learned_parameters, learning_rates
@@ -318,4 +447,71 @@ class Pinn(nn.Module):
         framed_parameters : float
             the result of the framing function describe above
         """
-        return (torch.tanh(param) + 1) / 2 * (self.ode_parameters_ranges[index][1] - self.ode_parameters_ranges[index][0]) + self.ode_parameters_ranges[index][0]
+        return (torch.tanh(param) + 1) / 2 * \
+                (self.ode_parameters_ranges[index][1] - 
+                 self.ode_parameters_ranges[index][0]) + \
+                self.ode_parameters_ranges[index][0]
+    
+
+    def soft_adapt(self,
+                   epoch,
+                   all_loss_residual_list,
+                   all_loss_variable_list,
+                   ):
+        """
+        This method return the weight given by the soft adapt method. For
+        every component of the loss, the method compare last loss with the
+        soft_adapt_t losses before. The higher this difference is, in 
+        comparison with other component, the higher will be the bigger
+        weights.
+
+        Parameters
+        ----------
+        epoch : int
+            actual epoch
+
+        all_loss_residual_list : list(list(float))
+            list at all epoch of loss for all residual component
+
+        all_loss_variable_list : list(list(float))
+            list at all epoch of loss for all variable component
+
+        Returns
+        -------
+        residual_method_weights: array(float)
+            weight for residual component of the loss
+
+        variable_method_weights: array(float)
+            weight for residual component of the loss
+        """
+
+        beta=self.soft_adapt_beta
+
+        if epoch >= self.soft_adapt_t:
+            index = epoch-self.soft_adapt_t
+            # last loss vector minus the loss vector self.soft_adapt_t before
+            x = np.concatenate((np.array(all_loss_residual_list[-1][:])-
+                                np.array(all_loss_residual_list[index][:]),
+                                np.array(all_loss_variable_list[-1][:]-
+                                np.array(all_loss_variable_list[index][:]))))
+            # Soft adapt between residual loss on one side and variable loss
+            # on the other side.
+            if self.soft_adapt_by_type:
+                if self.soft_adapt_normalize:
+                    x[:self.nb_res]=x[:self.nb_res]/ \
+                                    np.linalg.norm(x[:self.nb_res])
+                    x[self.nb_res:]=x[self.nb_res:]/ \
+                                    np.linalg.norm(x[self.nb_res:])
+
+                return softmax(x[:self.nb_res]*beta),\
+                    softmax(x[self.nb_res:]*beta)
+            # Soft adapt on all losses.
+            else:
+                if self.soft_adapt_normalize:
+                    x = x/np.linalg.norm(x)
+                return softmax(beta * x)[:self.nb_res], \
+                       softmax(beta * x)[self.nb_res:]
+        else:
+            return np.array([1] *self.nb_res), \
+                   np.array([1] * self.nb_observables)
+    

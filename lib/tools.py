@@ -107,10 +107,10 @@ def random_ranges(true_parameters, scale):
     return [(rd.random()*p/scale,scale*(1+rd.random())*p) for p in true_parameters]
 
 def init_weights_xavier(m):
-            if isinstance(m, nn.Linear):
-                torch.nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    m.bias.data.fill_(0.01)
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            m.bias.data.fill_(0.01)
 
 # takes in a module and applies the specified weight initialization
 def weights_init_uniform(m):
