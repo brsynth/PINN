@@ -6,6 +6,9 @@ from tqdm import tqdm
 from scipy.special import softmax
 from .tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage, init_weights_xavier
 
+import torch
+import torch.optim as optim
+
 class Pinn(nn.Module):
     """
     Class of physicals-informed neural network.
@@ -128,7 +131,6 @@ class Pinn(nn.Module):
                  parameter_names,
                  optimizer_type,
                  optimizer_hyperparameters,
-                 scheduler_type,
                  scheduler_hyperparameters,
                  constants_dict={},
                  multi_loss_method=None,
@@ -197,12 +199,10 @@ class Pinn(nn.Module):
         # Neural network with time as input and predict variables as output
         self.neural_net = self.NeuralNet(net_hidden,self.nb_variables)
         self.neural_net.apply(init_weights_xavier)
-        self.params = list(self.neural_net.parameters())
-        self.params.extend(self.ode_parameters.values())
-        self.optimizer = optimizer_type(**({"params":self.params} |
-                                           optimizer_hyperparameters))
-        self.scheduler = scheduler_type(**({"optimizer":self.optimizer} |
-                                           scheduler_hyperparameters))
+        params = list(self.neural_net.parameters())
+        params.extend(self.ode_parameters.values())
+        self.optimizer=self.set_optimizer(optimizer_type,params,optimizer_hyperparameters)
+        self.scheduler = self.set_scheduler(scheduler_hyperparameters)
         self.constants_dict = constants_dict
         self.multi_loss_method = multi_loss_method
 
@@ -228,6 +228,21 @@ class Pinn(nn.Module):
         self.soft_adapt_normalize=soft_adapt_normalize
         self.soft_adapt_by_type=soft_adapt_by_type
         self.prior_losses_t = prior_losses_t
+
+
+    def set_optimizer(self,opimizer_type,parameters,hyperparameters):
+        if opimizer_type == "Adam":
+            optimizer = optim.Adam
+            return optimizer(**({"params":parameters} |
+                                           hyperparameters))
+        else:
+            print("Please enter optimizer type")
+    
+    def set_scheduler(self,hyperparameters):
+        scheduler= optim.lr_scheduler.CyclicLR
+        return scheduler(**({"optimizer":self.optimizer} |
+                                       hyperparameters))
+
 
     class NeuralNet(nn.Module): # input: [[t1], [t2]...[t100]] batch of timesteps
 
@@ -514,4 +529,3 @@ class Pinn(nn.Module):
         else:
             return np.array([1] *self.nb_res), \
                    np.array([1] * self.nb_observables)
-    
