@@ -1,10 +1,12 @@
 import torch
+import optuna
 import numpy as np
 from torch import nn
 from numpy import isnan
 from tqdm import tqdm
 from scipy.special import softmax
 from .tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage, init_weights_xavier
+import torch.optim as optim
 
 class Pinn(nn.Module):
     """
@@ -97,7 +99,17 @@ class Pinn(nn.Module):
     
     prior_losses_t : int 
         similar to soft_adapt_t but using the prior loss method
-         
+
+    wang_residual : bool
+        if True then the balancing is applied to the residual loss,
+        else it is to the variable fit loss.
+
+    wang_t : int
+        similar to soft_adapt_t but using the wang method
+    
+    wang_alpha : float
+        same as soft_adapt_beta vut for wang method
+
     Methods
     -------
     net_f : (t_batch) -> (residual,neural_output)
@@ -128,18 +140,21 @@ class Pinn(nn.Module):
                  parameter_names,
                  optimizer_type,
                  optimizer_hyperparameters,
-                 scheduler_type,
                  scheduler_hyperparameters,
-                 constants_dict={},
+                 constants_dict,
                  multi_loss_method=None,
                  residual_weights=None,
                  variable_fit_weights=None,
                  soft_adapt_beta=0.1,
-                 soft_adapt_t=100,
+                 soft_adapt_t=1,
                  soft_adapt_normalize=True,
                  soft_adapt_by_type=True,
-                 prior_losses_t=1,
+                 prior_losses_t=100,
+                 wang_residual = True,
+                 wang_t=1,
+                 wang_alpha=0.9,
                  net_hidden=7,
+                 optuna=False,
                  ):
         super(Pinn,self).__init__()
 
@@ -197,12 +212,10 @@ class Pinn(nn.Module):
         # Neural network with time as input and predict variables as output
         self.neural_net = self.NeuralNet(net_hidden,self.nb_variables)
         self.neural_net.apply(init_weights_xavier)
-        self.params = list(self.neural_net.parameters())
-        self.params.extend(self.ode_parameters.values())
-        self.optimizer = optimizer_type(**({"params":self.params} |
-                                           optimizer_hyperparameters))
-        self.scheduler = scheduler_type(**({"optimizer":self.optimizer} |
-                                           scheduler_hyperparameters))
+        params = list(self.neural_net.parameters())
+        params.extend(self.ode_parameters.values())
+        self.optimizer=self.set_optimizer(optimizer_type,params,optimizer_hyperparameters)
+        self.scheduler = self.set_scheduler(scheduler_hyperparameters)
         self.constants_dict = constants_dict
         self.multi_loss_method = multi_loss_method
 
@@ -228,6 +241,27 @@ class Pinn(nn.Module):
         self.soft_adapt_normalize=soft_adapt_normalize
         self.soft_adapt_by_type=soft_adapt_by_type
         self.prior_losses_t = prior_losses_t
+        self.wang_residual = wang_residual
+        self.wang_t = wang_t
+        self.wang_alpha = wang_alpha
+
+        # Is this object is used inside optuna trial
+        self.optuna=optuna
+
+
+    def set_optimizer(self,opimizer_type,parameters,hyperparameters):
+        if opimizer_type == "Adam":
+            optimizer = optim.Adam
+            return optimizer(**({"params":parameters} |
+                                           hyperparameters))
+        else:
+            print("Please enter optimizer type")
+    
+    def set_scheduler(self,hyperparameters):
+        scheduler= optim.lr_scheduler.CyclicLR
+        return scheduler(**({"optimizer":self.optimizer} |
+                                       hyperparameters))
+
 
     class NeuralNet(nn.Module): # input: [[t1], [t2]...[t100]] batch of timesteps
 
@@ -339,8 +373,17 @@ class Pinn(nn.Module):
         losses : list (float)
             losses for every epoch
 
+        residual_losses : list (float)
+            residual losses for every epoch
+
+        variable_fit_losses : list (float)
+            variable fit losses for every epoch
+
         all_learned_parameters : list (list (float))
             learned parameters for every epochs
+
+        learning_rates : list (float)
+            learning rate for every epoch
         """
 
         # Monitor the training
@@ -354,6 +397,10 @@ class Pinn(nn.Module):
         # Losses vectors for all epochs
         all_loss_residual_list = []
         all_loss_variable = []
+
+        # Weights vectors for all epochs
+        all_weights_residual_list = []
+        all_weights_variable = []
 
         for epoch in tqdm(range(n_epochs), desc="Training the neural network", ncols=150):
             res, net_output = self.net_f(self.t_batch)
@@ -382,13 +429,26 @@ class Pinn(nn.Module):
                                     all_loss_residual_list,
                                     all_loss_variable,
                                     )
-                
+
             elif self.multi_loss_method == "prior_losses":
                 index=max(0,epoch-self.prior_losses_t)
                 residual_method_weights = [1/(all_loss_residual_list[index][i])
                                            for i in range(self.nb_res)]
                 variable_method_weights = [1/(all_loss_variable[index][i])
                                            for i in range(self.nb_observables)]
+
+            elif self.multi_loss_method == "wang":
+                residual_method_weights,variable_method_weights=\
+                    self.wang(epoch,
+                              loss_residual_list,
+                              loss_variable_fit_list,
+                              all_weights_residual_list,
+                              all_weights_variable,
+                              )
+
+            # Weights vectors for all epochs
+            all_weights_residual_list.append(residual_method_weights)
+            all_weights_variable.append(variable_method_weights)
 
             # loss multiply by manual weights and weights from method above
             loss_residual = sum([loss_residual_list[i]*
@@ -399,10 +459,12 @@ class Pinn(nn.Module):
                                      variable_method_weights[i]*
                                      self.variable_fit_weights[i]
                                      for i in range(self.nb_observables)])
-            
+
             loss = loss_residual + loss_variable_fit
-            
+
             if isnan(loss.detach().numpy()):
+                if self.optuna:
+                    raise optuna.exceptions.TrialPruned()
                 raise ValueError("loss is not a number (nan) anymore. Consider changing the hyperparameters. This happened at epoch " + str(epoch) +".")
 
             loss.backward()
@@ -426,7 +488,13 @@ class Pinn(nn.Module):
                                                     net_output[i]
                            for (i,k) in enumerate(self.variables.keys())]
 
-        return parameter_errors, last_pred_unorm, losses, variable_fit_losses, residual_losses, all_learned_parameters, learning_rates
+        return parameter_errors, \
+               last_pred_unorm, \
+               losses, \
+               variable_fit_losses, \
+               residual_losses, \
+               all_learned_parameters, \
+               learning_rates
 
 
     def output_param_range(self, param, index):
@@ -451,7 +519,7 @@ class Pinn(nn.Module):
                 (self.ode_parameters_ranges[index][1] - 
                  self.ode_parameters_ranges[index][0]) + \
                 self.ode_parameters_ranges[index][0]
-    
+
 
     def soft_adapt(self,
                    epoch,
@@ -514,4 +582,87 @@ class Pinn(nn.Module):
         else:
             return np.array([1] *self.nb_res), \
                    np.array([1] * self.nb_observables)
-    
+
+
+    def wang(self,
+             epoch,
+             loss_residual_list,
+             loss_variable_fit_list,
+             all_weights_residual_list,
+             all_weights_variable,
+            ):
+        """
+        This method return the weights given by the method described in Wang et al.
+
+        Parameters
+        ----------
+        epoch : int
+            actual epoch
+
+        loss_residual_list : list(tensor)
+            list of the residual loss components
+
+        loss_variable_fit_list : list(tensor)
+            list of the variable_fit loss components  
+
+        all_weights_residual_list : list(list(float))
+            list of the residual weights vectors
+
+        all_weights_variable : list(list(float))
+            list of the variable weights vectors
+
+        Returns
+        -------
+        residual_method_weights: array(float)
+            weight for residual component of the loss
+
+        variable_method_weights: array(float)
+            weight for residual component of the loss
+        """
+        if epoch >= self.wang_t :
+            # Defining which part of the loss has to be balanced
+            if self.wang_residual :
+                sick_loss_list = loss_residual_list
+                sane_loss = sum(loss_variable_fit_list)
+            else :
+                sick_loss_list = loss_variable_fit_list
+                sane_loss = sum(loss_residual_list)
+
+            # Computing the maximum of the absolute values of the gradient loss coordinates for
+            # the term that do not need balancing
+            sane_loss.backward(retain_graph=True)
+            grads = torch.cat([param.grad.flatten()
+                               for param in self.params if param.grad is not None])
+            max_grad = torch.max(torch.abs(grads)).item()
+            self.optimizer.zero_grad()
+
+            # Computing the mean of the absolute values of the gradient loss coordinates for
+            # every term that needs balancing
+            means_grad = []
+            for loss in sick_loss_list:
+                loss.backward(retain_graph=True)
+                grads = torch.cat([param.grad.flatten()
+                               for param in self.params if param.grad is not None])
+                means_grad.append(torch.mean(torch.abs(grads)).item())
+                self.optimizer.zero_grad()
+
+            lambda_hat = max_grad/np.array(means_grad)
+
+            # Giving the weights in function of the loss terms we want to balance
+            # The final weights are a weighted average between previous weights and lambda_hat
+            if self.wang_residual :
+                residual_method_weights = \
+                    (1 - self.wang_alpha)*np.array(all_weights_residual_list[epoch - self.wang_t]) \
+                        + self.wang_alpha*lambda_hat
+                variable_method_weights = [1]*self.nb_observables
+            else :
+                residual_method_weights = [1]*self.nb_res
+                variable_method_weights = \
+                    (1 - self.wang_alpha)*np.array(all_weights_variable[epoch - self.wang_t]) \
+                        + self.wang_alpha*lambda_hat
+        else :
+            residual_method_weights = [1]*self.nb_res
+            variable_method_weights = [1]*self.nb_observables
+
+
+        return residual_method_weights, variable_method_weights
