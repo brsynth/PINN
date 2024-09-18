@@ -12,9 +12,10 @@ from ode_equation.deriv_equations_Millard import ODE_residual_dict_Millard, deri
 from ode_equation.Millard_dicts import ode_parameters_dict, ode_parameter_ranges_dict, variable_standard_deviations_dict
 
 
-def pinn_score(training_dict, data_dict, ode_dict,seed=42):
+def pinn_score(training_dict, data_dict, ode_dict,seed=42,optuna=False):
     """
-    This function create, train and score a physic-informed neural network.
+    This function create, train and score a physic-informed neural network. The score is
+    given by the ability to fit observed curved by solving ODE with learned parameters.
     
     Parameters
     ----------
@@ -34,6 +35,8 @@ def pinn_score(training_dict, data_dict, ode_dict,seed=42):
     
     Returns
     -------
+    error : float
+    error as a residual sum of squares.
     
     """
     torch.manual_seed(seed)
@@ -74,6 +77,7 @@ def pinn_score(training_dict, data_dict, ode_dict,seed=42):
                      multi_loss_method=training_dict["multiple_loss_method"]["name"],
                      residual_weights=residual_weights,
                      variable_fit_weights=variable_fit_weights,
+                     optuna=optuna,
                      )
 
 

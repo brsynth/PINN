@@ -1,12 +1,11 @@
 import torch
+import optuna
 import numpy as np
 from torch import nn
 from numpy import isnan
 from tqdm import tqdm
 from scipy.special import softmax
 from .tools import nul_matrix_except_one_column_of_ones, normalize, denormalize, mean_error_percentage, init_weights_xavier
-
-import torch
 import torch.optim as optim
 
 class Pinn(nn.Module):
@@ -142,6 +141,7 @@ class Pinn(nn.Module):
                  soft_adapt_by_type=True,
                  prior_losses_t=1,
                  net_hidden=7,
+                 optuna=False,
                  ):
         super(Pinn,self).__init__()
 
@@ -228,6 +228,9 @@ class Pinn(nn.Module):
         self.soft_adapt_normalize=soft_adapt_normalize
         self.soft_adapt_by_type=soft_adapt_by_type
         self.prior_losses_t = prior_losses_t
+
+        # Is this object is used inside optuna trial
+        self.optuna=optuna
 
 
     def set_optimizer(self,opimizer_type,parameters,hyperparameters):
@@ -418,6 +421,8 @@ class Pinn(nn.Module):
             loss = loss_residual + loss_variable_fit
             
             if isnan(loss.detach().numpy()):
+                if self.optuna:
+                    raise optuna.exceptions.TrialPruned()
                 raise ValueError("loss is not a number (nan) anymore. Consider changing the hyperparameters. This happened at epoch " + str(epoch) +".")
 
             loss.backward()
